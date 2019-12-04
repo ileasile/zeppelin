@@ -586,10 +586,14 @@ export function getTransformer(conf, rows, axisSpecs, axis) {
       i++;
     }
 
+    const otherColumn = {
+      index: 0,
+    };
+
     const {cube, schema,
       key1ColumnName, key1Names, key2ColumnName, key2Names,
       groupNameSet, selectorNameWithIndex,
-    } = getKKGACube(rows, key1Columns, key2Columns, groupColumns, aggregatorColumns);
+    } = getKKGACube2(rows, key1Columns, key2Columns, groupColumns, aggregatorColumns, otherColumn);
 
     const {
       transformed, groupNames, sortedSelectors,
@@ -1030,6 +1034,144 @@ export function getKKGACube(rows, key1Columns, key2Columns, groupColumns, aggrCo
   };
 }
 
+
+export function getKKGACube2(rows, key1Columns, key2Columns, groupColumns, aggrColumns, otherColumn) {
+  const schema = {
+    key1: key1Columns.length !== 0,
+    key2: key2Columns.length !== 0,
+    group: groupColumns.length !== 0,
+    aggregator: aggrColumns.length !== 0,
+    other: true,
+  };
+
+  let cube = {};
+  const entry = {};
+
+  const key1ColumnName = key1Columns.map((c) => c.name).join('.');
+  const key1NameSet = {};
+  const key2ColumnName = key2Columns.map((c) => c.name).join('.');
+  const key2NameSet = {};
+  const groupNameSet = new Set();
+  const selectorNameWithIndex = {}; /** { selectorName: index } */
+  let indexCounter = 0;
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    let e = entry;
+    let c = cube;
+
+    // key1: add to entry
+    let mergedKey1Name;
+    if (schema.key1) {
+      mergedKey1Name = key1Columns.map((c) => row[c.index]).join('.');
+      if (!e[mergedKey1Name]) {
+        e[mergedKey1Name] = {children: {}};
+      }
+      e = e[mergedKey1Name].children;
+      // key1: add to row
+      if (!c[mergedKey1Name]) {
+        c[mergedKey1Name] = {};
+      }
+      c = c[mergedKey1Name];
+
+      if (!key1NameSet[mergedKey1Name]) {
+        key1NameSet[mergedKey1Name] = true;
+      }
+    }
+
+    // key2: add to entry
+    let mergedKey2Name;
+    if (schema.key2) {
+      mergedKey2Name = key2Columns.map((c) => row[c.index]).join('.');
+      if (!e[mergedKey2Name]) {
+        e[mergedKey2Name] = {children: {}};
+      }
+      e = e[mergedKey2Name].children;
+      // key2: add to row
+      if (!c[mergedKey2Name]) {
+        c[mergedKey2Name] = {};
+      }
+      c = c[mergedKey2Name];
+
+      if (!key2NameSet[mergedKey2Name]) {
+        key2NameSet[mergedKey2Name] = true;
+      }
+    }
+
+    let mergedGroupName;
+    if (schema.group) {
+      mergedGroupName = groupColumns.map((c) => row[c.index]).join('.');
+
+      // add group to entry
+      if (!e[mergedGroupName]) {
+        e[mergedGroupName] = {children: {}};
+      }
+      e = e[mergedGroupName].children;
+      // add group to row
+      if (!c[mergedGroupName]) {
+        c[mergedGroupName] = {};
+      }
+      c = c[mergedGroupName];
+      groupNameSet.add(mergedGroupName);
+    }
+
+    for (let a = 0; a < aggrColumns.length; a++) {
+      const aggrColumn = aggrColumns[a];
+      const aggrName = `${aggrColumn.name}(${aggrColumn.aggr})`;
+
+      // update groupNameSet
+      if (!mergedGroupName) {
+        groupNameSet.add(aggrName); /** aggr column name will be used as group name if group is empty */
+      }
+
+      // update selectorNameWithIndex
+      const selector = getSelectorName(mergedGroupName, aggrColumns.length, aggrName);
+      if (typeof selectorNameWithIndex[selector] === 'undefined' /** value might be 0 */) {
+        selectorNameWithIndex[selector] = indexCounter;
+        indexCounter = indexCounter + 1;
+      }
+
+      // add aggregator to entry
+      if (!e[aggrName]) {
+        e[aggrName] = {type: 'aggregator', order: aggrColumn, index: aggrColumn.index};
+      }
+
+      // add aggregatorName to row
+      if (!c[aggrName]) {
+        c[aggrName] = {
+          aggr: aggrColumn.aggr,
+          value: (aggrColumn.aggr !== 'count') ? row[aggrColumn.index] : 1,
+          other: row[otherColumn.index],
+          count: 1,
+        };
+      } else {
+        const value = AggregatorFunctions[aggrColumn.aggr](
+          c[aggrName].value, row[aggrColumn.index], c[aggrName].count + 1);
+        const count = (AggregatorFunctionDiv[aggrColumn.aggr])
+          ? c[aggrName].count + 1 : c[aggrName].count;
+
+        c[aggrName].value = value;
+        c[aggrName].count = count;
+      }
+    } /** end loop for aggrColumns */
+  }
+
+  let key1Names = sortWithNumberSupport(Object.keys(key1NameSet)); /** keys should be sorted */
+  let key2Names = sortWithNumberSupport(Object.keys(key2NameSet)); /** keys should be sorted */
+
+  return {
+    cube: cube,
+    schema: schema,
+    key1ColumnName: key1ColumnName,
+    key1Names: key1Names,
+    key2ColumnName: key2ColumnName,
+    key2Names: key2Names,
+    groupNameSet: groupNameSet,
+    selectorNameWithIndex: selectorNameWithIndex,
+  };
+}
+
+
 export function getSelectorName(mergedGroupName, aggrColumnLength, aggrColumnName) {
   if (!mergedGroupName) {
     return aggrColumnName;
@@ -1057,6 +1199,10 @@ export function getCubeValue(obj, aggregator, aggrColumnName) {
   } catch (error) { /** iognore */ }
 
   return value;
+}
+
+export function getCubeValue2(obj, aggregator, aggrColumnName) {
+  return obj[aggrColumnName].other;
 }
 
 export function getNameWithIndex(names) {
@@ -1101,6 +1247,8 @@ export function fillSelectorRows(schema, cube, selectorRows,
     for (let aggrColumn of aggrColumns) {
       const aggrName = `${aggrColumn.name}(${aggrColumn.aggr})`;
       const value = getCubeValue(grouped, aggrColumn.aggr, aggrName);
+      const otherValue = getCubeValue2(grouped, aggrColumn.aggr, aggrName);
+
       const selector = getSelectorName(mergedGroupName, aggrColumns.length, aggrName);
       const selectorIndex = selectorNameWithIndex[selector];
 
@@ -1109,6 +1257,10 @@ export function fillSelectorRows(schema, cube, selectorRows,
       }
 
       const row = {aggregated: value};
+
+      if (typeof otherValue !== 'undefined') {
+        row.other = otherValue;
+      }
 
       if (typeof key1Name !== 'undefined') {
         row.key1 = key1Name;
